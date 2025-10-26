@@ -111,16 +111,17 @@ elif [ "$choice" = "1" ]; then
   best=0
 
   ip link set dev "$main_iface" mtu 1500 > /dev/null 2>&1
+while [ $lower -le $upper ]; do
+  mid=$(((lower + upper) / 2))
+  if ping -M do -s $((mid - 28)) -c 1 "$host" > /dev/null 2>&1; then
+    best=$mid
+    lower=$((mid + 1))
+  else
+    upper=$((mid - 1))
+  fi
+done
 
-  while [ $((upper - lower)) -gt 1 ]; do
-    mid=$(((upper + lower) / 2))
-    if ping -M do -s $((mid - 28)) -c 1 "$host" > /dev/null 2>&1; then
-      lower=$mid
-      best=$mid
-    else
-      upper=$mid
-    fi
-  done
+mtu_value=$best
 
   mtu_value=$best
   echo -e "${PINK}✅ Best MTU detected: ${WHITE}$mtu_value${RESET}"
