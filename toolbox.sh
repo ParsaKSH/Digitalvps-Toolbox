@@ -357,10 +357,26 @@ mirror_menu() {
 }
 
 dns_menu() {
+    _dns_query_time_ms() {
+      local ip="$1"
+      local out ms ans
+      out="$(dig @"$ip" cloudflare.com +time=2 +tries=1 +stats 2>&1)" || return 1
+      ans="$(printf "%s\n" "$out" | awk '/^cloudflare\.com\./ {print $0; exit}')"
+      if [ -z "$ans" ]; then
+        ans="$(dig @"$ip" cloudflare.com +time=2 +tries=1 +short 2>/dev/null | head -n1)"
+        [ -z "$ans" ] && return 1
+      fi
+
+      ms="$(printf "%s\n" "$out" | awk -F': ' '/;; Query time:/{print $2}' | awk '{print $1}' | tail -n1)"
+      [[ "$ms" =~ ^[0-9]+$ ]] || ms=9999
+      printf "%s" "$ms"
+      return 0
+    }
+
   while true; do
     draw_menu "DNS Configuration" \
       "1) Use INTERNATIONAL DNS (Google / Cloudflare / Quad9)" \
-      "2) Use IRANIAN DNS (Anti-Tahrim)" \
+      "2) Use IRANIAN DNS" \
       "3) Manual entry" \
       "4) Back"
     read dns_choice
@@ -374,6 +390,7 @@ dns_menu() {
 
       declare -A dns_names
       dns_sets=()
+      profile=""
 
       if [ "$dns_choice" = "1" ]; then
         profile="International"
@@ -388,93 +405,190 @@ dns_menu() {
           "9.9.9.9 149.112.112.112"
         )
       else
-        profile="Iranian (Anti-Tahrim)"
-        dns_names=(
-          [0]="Electro"
-          [1]="Shekan"
-          [2]="Dnspro"
-          [3]="Pishgaman"
-        )
-        dns_sets=(
-          "78.157.42.100 78.157.42.101"
-          "178.22.122.100 185.51.200.2"
-          "87.107.110.109 87.107.110.110"
-          "5.202.100.100 5.202.100.101"
-        )
+
+        while true; do
+          draw_menu "IRANIAN DNS" \
+            "1) Normal" \
+            "2) Anti-Tahrim" \
+            "3) Back"
+          read iran_choice
+
+          if [ "$iran_choice" = "1" ]; then
+            profile="Iranian (Normal)"
+            dns_names=(
+              [0]="DigitalVPS"
+              [1]="shatel"
+              [2]="itc"
+              [3]="itc-tabriz"
+              [4]="derak-cloud"
+              [5]="respina"
+              [6]="faradadeh"
+              [7]="AUT"
+              [8]="TIC"
+              [9]="Pishgaman"
+            )
+            dns_sets=(
+              "10.30.72.189"
+              "85.15.1.14 85.15.1.15"
+              "217.218.155.155 217.218.127.127 2.188.21.130"
+              "217.219.72.194 2.185.239.133 2.185.239.139"
+              "193.151.128.100 193.151.128.200"
+              "10.202.10.202 10.202.10.102"
+              "81.91.144.116"
+              "185.51.200.2 185.51.200.4"
+              "217.218.155.155 217.218.127.127"
+              "5.202.100.100 5.202.100.101"
+            )
+            break
+          elif [ "$iran_choice" = "2" ]; then
+            profile="Iranian (Anti-Tahrim)"
+            dns_names=(
+              [0]="Electro"
+              [1]="Shekan"
+              [2]="Dnspro"
+            )
+            dns_sets=(
+              "78.157.42.100 78.157.42.101"
+              "178.22.122.100 185.51.200.2"
+              "87.107.110.109 87.107.110.110"
+            )
+            break
+          elif [ "$iran_choice" = "3" ]; then
+            profile=""
+            break
+          else
+            echo -e "${RED}❌ Invalid option.${RESET}"
+          fi
+        done
+
+        [ -z "$profile" ] && continue
       fi
 
-      working=()
-      results=()
+      working_results=()
+      failed_results=()
+      best_idx=""
+      best_ms=""
 
       for i in "${!dns_sets[@]}"; do
-        IFS=' ' read -r dns1 dns2 <<< "${dns_sets[$i]}"
+        dns_ips="${dns_sets[$i]}"
+        ok=0
+        min_ms=""
 
-        dig @"$dns1" cloudflare.com +short >/dev/null 2>&1 && ok1=1 || ok1=0
-        dig @"$dns2" cloudflare.com +short >/dev/null 2>&1 && ok2=1 || ok2=0
+        for ip in $dns_ips; do
+          ms="$(_dns_query_time_ms "$ip")" || ms=""
+          if [ -n "$ms" ]; then
+            ok=1
+            if [ -z "$min_ms" ] || [ "$ms" -lt "$min_ms" ]; then
+              min_ms="$ms"
+            fi
+          fi
+        done
 
-        if [ "$ok1" -eq 1 ] || [ "$ok2" -eq 1 ]; then
+        if [ "$ok" -eq 1 ]; then
           status="${GREEN}OK${RESET}"
-          working+=("$i")
+          working_results+=("$i|${dns_names[$i]}|$dns_ips|$status|$min_ms")
+          if [ -z "$best_ms" ] || [ "$min_ms" -lt "$best_ms" ]; then
+            best_ms="$min_ms"
+            best_idx="$i"
+          fi
         else
           status="${RED}Failed${RESET}"
+          failed_results+=("$i|${dns_names[$i]}|$dns_ips|$status")
         fi
-
-        results+=("$i|${dns_names[$i]}|${dns_sets[$i]}|$status")
       done
 
-      echo -e "\n${CYAN}📊 DNS Test Results (${profile}):${RESET}"
-      printf "${GREEN}%-4s %-15s %-25s %-10s${RESET}\n" "No." "Name" "DNS Servers" "Status"
-      echo -e "${WHITE}---------------------------------------------------------------${RESET}"
-      for r in "${results[@]}"; do
-        IFS='|' read -r idx dns_name dns_ips status <<< "$r"
-        printf "%-4s %-15s %-25s " "$((idx+1))" "$dns_name" "$dns_ips"
-        echo -e "$status"
-      done
+      echo -e "\n${CYAN}📊 DNS Test Results (${profile}) - Working only:${RESET}"
+      printf "${GREEN}%-4s %-15s %-45s %-10s %-10s${RESET}\n" "No." "Name" "DNS Servers" "Status" "Best(ms)"
+      echo -e "${WHITE}---------------------------------------------------------------------------------------------------------------${RESET}"
 
-      if [ ${#working[@]} -eq 0 ]; then
+      if [ ${#working_results[@]} -eq 0 ]; then
         echo -e "${RED}❌ No working DNS servers found in ${profile} list.${RESET}"
         read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
         return
       fi
 
-      best="${working[0]}"
-      echo -e "\n${GREEN}Suggested DNS (${profile}):${RESET} ${dns_names[$best]} - ${dns_sets[$best]}"
-      read -p "$(echo -e "${ORANGE}❓ Enter the number of the DNS to apply [${YELLOW}$((best+1))${ORANGE}]: ${RESET}")" selected
-      selected="${selected:-$((best+1))}"
-
-      if ! [[ "$selected" =~ ^[0-9]+$ ]] || [ "$selected" -lt 1 ] || [ "$selected" -gt ${#dns_sets[@]} ]; then
-        echo -e "${RED}❌ Invalid selection.${RESET}"
-        read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
-        return
-      fi
-
-      selected_dns="${dns_sets[$((selected-1))]}"
-      dns1=$(echo "$selected_dns" | awk '{print $1}')
-      dns2=$(echo "$selected_dns" | awk '{print $2}')
-
-      if systemctl is-active --quiet systemd-resolved; then
-        iface=$(ip route | grep default | awk '{print $5}' | head -n1)
-        echo -e "${CYAN}🔧 systemd-resolved is active. Applying DNS via resolvectl for interface: ${WHITE}$iface${RESET}"
-        if [ -n "$dns2" ]; then
-          resolvectl dns "$iface" "$dns1" "$dns2"
-        else
-          resolvectl dns "$iface" "$dns1"
+      suggested_pos=1
+      pos=1
+      for r in "${working_results[@]}"; do
+        IFS='|' read -r idx dns_name dns_ips status ms <<< "$r"
+        printf "%-4s %-15s %-45s " "$pos" "$dns_name" "$dns_ips"
+        echo -ne "$status"
+        printf " %-10s\n" "$ms"
+        if [ "$idx" = "$best_idx" ]; then
+          suggested_pos="$pos"
         fi
-        resolvectl domain "$iface" "~."
-        echo -e "${GREEN}✅ DNS set using resolvectl.${RESET}"
-      else
-        echo -e "${YELLOW}⚠️ systemd-resolved is not active. Writing to /etc/resolv.conf directly.${RESET}"
-        rm -f /etc/resolv.conf
-        {
-          echo "nameserver $dns1"
-          [ -n "$dns2" ] && echo "nameserver $dns2"
-        } > /etc/resolv.conf
-        echo -e "${GREEN}✅ DNS written to /etc/resolv.conf.${RESET}"
-        echo -e "${GREEN}✅ DNS updated (temporarily in /etc/resolv.conf).${RESET}"
-      fi
+        pos=$((pos+1))
+      done
 
-      read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
-      return
+      echo -e "\n${GREEN}Suggested DNS (${profile}) [lowest latency]:${RESET} ${dns_names[$best_idx]} - ${dns_sets[$best_idx]} (${best_ms} ms)"
+
+      while true; do
+        echo
+        draw_menu "DNS Actions" \
+          "1) Apply a DNS (from working list)" \
+          "2) Show not working DNSs" \
+          "3) Back"
+        read action_choice
+
+        if [ "$action_choice" = "1" ]; then
+          read -p "$(echo -e "${ORANGE}❓ Enter the number of the DNS to apply [${YELLOW}${suggested_pos}${ORANGE}]: ${RESET}")" selected
+          selected="${selected:-$suggested_pos}"
+
+          if ! [[ "$selected" =~ ^[0-9]+$ ]] || [ "$selected" -lt 1 ] || [ "$selected" -gt ${#working_results[@]} ]; then
+            echo -e "${RED}❌ Invalid selection.${RESET}"
+            continue
+          fi
+
+          chosen_line="${working_results[$((selected-1))]}"
+          IFS='|' read -r chosen_idx chosen_name chosen_ips _ _ <<< "$chosen_line"
+
+          if systemctl is-active --quiet systemd-resolved; then
+            iface=$(ip route | grep default | awk '{print $5}' | head -n1)
+            echo -e "${CYAN}🔧 systemd-resolved is active. Applying DNS via resolvectl for interface: ${WHITE}$iface${RESET}"
+            resolvectl dns "$iface" $chosen_ips
+            resolvectl domain "$iface" "~."
+            echo -e "${GREEN}✅ DNS set using resolvectl.${RESET}"
+          else
+            echo -e "${YELLOW}⚠️ systemd-resolved is not active. Writing to /etc/resolv.conf directly.${RESET}"
+            rm -f /etc/resolv.conf
+            {
+              for ip in $chosen_ips; do
+                echo "nameserver $ip"
+              done
+            } > /etc/resolv.conf
+            echo -e "${GREEN}✅ DNS written to /etc/resolv.conf.${RESET}"
+            echo -e "${GREEN}✅ DNS updated (temporarily in /etc/resolv.conf).${RESET}"
+          fi
+
+          read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
+          return
+
+        elif [ "$action_choice" = "2" ]; then
+          echo -e "\n${CYAN}📉 Not Working DNSs (${profile}):${RESET}"
+          printf "${GREEN}%-4s %-15s %-45s %-10s${RESET}\n" "No." "Name" "DNS Servers" "Status"
+          echo -e "${WHITE}---------------------------------------------------------------------------------------------------------------${RESET}"
+
+          if [ ${#failed_results[@]} -eq 0 ]; then
+            echo -e "${GREEN}✅ All DNSs are working in this profile.${RESET}"
+          else
+            m=1
+            for r in "${failed_results[@]}"; do
+              IFS='|' read -r _ dns_name dns_ips status <<< "$r"
+              printf "%-4s %-15s %-45s " "$m" "$dns_name" "$dns_ips"
+              echo -e "$status"
+              m=$((m+1))
+            done
+          fi
+
+          read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
+          continue
+
+        elif [ "$action_choice" = "3" ]; then
+          return
+        else
+          echo -e "${RED}❌ Invalid option.${RESET}"
+        fi
+      done
 
     elif [ "$dns_choice" = "3" ]; then
       echo -ne "${WHITE}Enter first DNS IP: ${RESET}"
@@ -488,24 +602,23 @@ dns_menu() {
         return
       fi
 
+      manual_ips="$dns1"
+      [ -n "$dns2" ] && manual_ips="$dns1 $dns2"
+
       if systemctl is-active --quiet systemd-resolved; then
         iface=$(ip route | grep default | awk '{print $5}' | head -n1)
         echo -e "${CYAN}🔧 systemd-resolved is active. Applying DNS via resolvectl for interface: ${WHITE}$iface${RESET}"
-        if [ -n "$dns2" ]; then
-          resolvectl dns "$iface" "$dns1" "$dns2"
-        else
-          resolvectl dns "$iface" "$dns1"
-        fi
+        resolvectl dns "$iface" $manual_ips
         resolvectl domain "$iface" "~."
         echo -e "${GREEN}✅ DNS set using resolvectl.${RESET}"
       else
         echo -e "${YELLOW}⚠️ systemd-resolved is not active. Writing to /etc/resolv.conf directly.${RESET}"
         rm -f /etc/resolv.conf
-        if [ -n "$dns2" ]; then
-          printf "nameserver %s\nnameserver %s\n" "$dns1" "$dns2" > /etc/resolv.conf
-        else
-          printf "nameserver %s\n" "$dns1" > /etc/resolv.conf
-        fi
+        {
+          for ip in $manual_ips; do
+            echo "nameserver $ip"
+          done
+        } > /etc/resolv.conf
         echo -e "${GREEN}✅ DNS written to /etc/resolv.conf.${RESET}"
       fi
 
@@ -520,6 +633,584 @@ dns_menu() {
     fi
   done
 }
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+_url_head_ok() {
+  local url="$1"
+  if have_cmd curl; then
+    curl -fsS --max-time 6 -o /dev/null "$url" >/dev/null 2>&1
+    return $?
+  else
+    wget -q -T 6 -O /dev/null "$url" >/dev/null 2>&1
+    return $?
+  fi
+}
+
+
+_url_speed_kbps() {
+  local url="$1"
+  if have_cmd curl; then
+    local bps
+    bps="$(curl -L --max-time 12 -o /dev/null -s -w "%{speed_download}" "$url" 2>/dev/null)"
+    [[ "$bps" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo 0; return; }
+    awk -v bps="$bps" 'BEGIN{printf "%d", (bps/1024)}'
+  else
+    local s kb
+    s="$(wget --timeout=12 --tries=1 -O /dev/null "$url" 2>&1 | grep -oE '[0-9.]+[[:space:]]+[KM]B/s' | tail -1)"
+    if [[ -z "$s" ]]; then echo 0; return; fi
+    if [[ "$s" == *"KB/s"* ]]; then
+      kb="$(echo "$s" | awk '{printf "%d",$1}')"
+    else
+      kb="$(echo "$s" | awk '{printf "%d",$1*1024}')"
+    fi
+    echo "${kb:-0}"
+  fi
+}
+
+_press_enter_back() {
+  read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
+}
+
+_show_working_list() {
+  local title="$1"
+  local arr_name="$2"
+  local show_speed="$3"
+
+  echo -e "\n${CYAN}${title}${RESET}"
+  if [ "$show_speed" -eq 1 ]; then
+    printf "${GREEN}%-4s %-18s %-55s %-10s${RESET}\n" "No." "Name" "URL" "Speed"
+    echo -e "${WHITE}-------------------------------------------------------------------------------------------------${RESET}"
+  else
+    printf "${GREEN}%-4s %-18s %-55s${RESET}\n" "No." "Name" "URL"
+    echo -e "${WHITE}---------------------------------------------------------------------------------${RESET}"
+  fi
+
+  local i=1
+  local line
+  eval "for line in \"\${${arr_name}[@]}\"; do
+    IFS='|' read -r name url kb <<< \"\$line\"
+    if [ \"$show_speed\" -eq 1 ]; then
+      printf \"%-4s %-18s %-55s %-10s\n\" \"\$i\" \"\$name\" \"\$url\" \"\${kb} KB/s\"
+    else
+      printf \"%-4s %-18s %-55s\n\" \"\$i\" \"\$name\" \"\$url\"
+    fi
+    i=\$((i+1))
+  done"
+}
+
+_docker_is_installed() { have_cmd docker; }
+
+_docker_test_and_rank() {
+  DOCKER_WORKING=()
+  DOCKER_FAILED=()
+
+  local names=("ArvanCloud" "Hamravesh" "docker.ir" "Runflare")
+  local urls=("https://docker.arvancloud.ir" "https://hub.hamdocker.ir" "https://registry.docker.ir" "https://mirror-docker.runflare.com")
+
+  local idx url name test_url kb
+  for idx in "${!urls[@]}"; do
+    name="${names[$idx]}"
+    url="${urls[$idx]}"
+
+    test_url="${url%/}/v2/"
+    if _url_head_ok "$test_url"; then
+      kb="$(_url_speed_kbps "$test_url")"
+      DOCKER_WORKING+=("$name|$url|$kb")
+    else
+      DOCKER_FAILED+=("$name|$url|0")
+    fi
+  done
+
+  local n=${#DOCKER_WORKING[@]} i j
+  for ((i=0;i<n;i++)); do
+    for ((j=i+1;j<n;j++)); do
+      local a b ak bk
+      a="${DOCKER_WORKING[$i]}"; b="${DOCKER_WORKING[$j]}"
+      ak="$(echo "$a" | awk -F'|' '{print $3}')"
+      bk="$(echo "$b" | awk -F'|' '{print $3}')"
+      if [ "$bk" -gt "$ak" ]; then
+        DOCKER_WORKING[$i]="$b"
+        DOCKER_WORKING[$j]="$a"
+      fi
+    done
+  done
+}
+
+_docker_apply_official() {
+  if [ -f /etc/docker/daemon.json ]; then
+    cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%s) 2>/dev/null
+  fi
+
+  cat > /etc/docker/daemon.json <<'EOF'
+{
+}
+EOF
+
+  systemctl restart docker >/dev/null 2>&1
+  docker logout >/dev/null 2>&1
+  echo -e "${GREEN}✅ Docker set to Official (no mirror).${RESET}"
+}
+
+_docker_apply_mirror() {
+  local mirror="$1" # base url
+  if [ -f /etc/docker/daemon.json ]; then
+    cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%s) 2>/dev/null
+  fi
+
+  local host
+  host="$(echo "$mirror" | sed -E 's#https?://##' | cut -d/ -f1)"
+
+  cat > /etc/docker/daemon.json <<EOF
+{
+  "insecure-registries" : ["${host}"],
+  "registry-mirrors": ["${mirror}"]
+}
+EOF
+
+  docker logout >/dev/null 2>&1
+  systemctl restart docker >/dev/null 2>&1
+  echo -e "${GREEN}✅ Docker mirror applied: ${WHITE}${mirror}${RESET}"
+}
+
+docker_mirror_menu() {
+  while true; do
+    if ! _docker_is_installed; then
+      echo -e "${RED}❌ Docker is not installed on this server.${RESET}"
+      _press_enter_back
+      return
+    fi
+
+    draw_menu "Docker Mirrors" \
+      "1) Official (Docker Hub default)" \
+      "2) Iranian mirror (auto-test & pick)" \
+      "3) Back"
+    read c
+
+    case "$c" in
+      1)
+        _docker_apply_official
+        _press_enter_back
+        return
+        ;;
+      2)
+        echo -e "${YELLOW}⏳ Testing Docker mirrors...${RESET}"
+        _docker_test_and_rank
+
+        if [ ${#DOCKER_WORKING[@]} -eq 0 ]; then
+          echo -e "${RED}❌ No working Docker mirrors found.${RESET}"
+          draw_menu "Docker Mirrors" "1) Show not working" "2) Back"
+          read x
+          if [ "$x" = "1" ]; then
+            echo -e "\n${CYAN}Not Working Docker Mirrors:${RESET}"
+            printf "${GREEN}%-4s %-18s %-55s %-10s${RESET}\n" "No." "Name" "URL" "Status"
+            echo -e "${WHITE}-------------------------------------------------------------------------------------------------${RESET}"
+            local i=1 line
+            for line in "${DOCKER_FAILED[@]}"; do
+              IFS='|' read -r name url _ <<< "$line"
+              printf "%-4s %-18s %-55s %b\n" "$i" "$name" "$url" "${RED}Failed${RESET}"
+              i=$((i+1))
+            done
+            _press_enter_back
+          fi
+          continue
+        fi
+
+        _show_working_list "📊 Working Docker mirrors:" DOCKER_WORKING 1
+        local suggested=1
+        local best_line="${DOCKER_WORKING[0]}"
+        local best_name best_url best_kb
+        IFS='|' read -r best_name best_url best_kb <<< "$best_line"
+        echo -e "\n${GREEN}Suggested (fastest):${RESET} ${best_name} - ${best_url}"
+
+        draw_menu "Docker Actions" \
+          "1) Apply suggested" \
+          "2) Choose from list" \
+          "3) Show not working" \
+          "4) Back"
+        read a
+        case "$a" in
+          1)
+            _docker_apply_mirror "$best_url"
+            _press_enter_back
+            return
+            ;;
+          2)
+            read -p "$(echo -e "${ORANGE}❓ Enter mirror number [${YELLOW}1${ORANGE}]: ${RESET}")" sel
+            sel="${sel:-1}"
+            if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#DOCKER_WORKING[@]} ]; then
+              echo -e "${RED}❌ Invalid selection.${RESET}"
+              continue
+            fi
+            IFS='|' read -r _name _url _kb <<< "${DOCKER_WORKING[$((sel-1))]}"
+            _docker_apply_mirror "$_url"
+            _press_enter_back
+            return
+            ;;
+          3)
+            echo -e "\n${CYAN}Not Working Docker Mirrors:${RESET}"
+            if [ ${#DOCKER_FAILED[@]} -eq 0 ]; then
+              echo -e "${GREEN}✅ None.${RESET}"
+            else
+              printf "${GREEN}%-4s %-18s %-55s %-10s${RESET}\n" "No." "Name" "URL" "Status"
+              echo -e "${WHITE}-------------------------------------------------------------------------------------------------${RESET}"
+              local i=1 line
+              for line in "${DOCKER_FAILED[@]}"; do
+                IFS='|' read -r name url _ <<< "$line"
+                printf "%-4s %-18s %-55s %b\n" "$i" "$name" "$url" "${RED}Failed${RESET}"
+                i=$((i+1))
+              done
+            fi
+            _press_enter_back
+            ;;
+          4) ;;
+          *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+        esac
+        ;;
+      3) return ;;
+      *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+    esac
+  done
+}
+
+_node_is_installed() { have_cmd node || have_cmd nvm || have_cmd npm; }
+
+_node_test_and_rank() {
+  NODE_WORKING=()
+  NODE_FAILED=()
+
+  local names=("Runflare")
+  local urls=("https://mirror-nodejs.runflare.com/dist/")
+
+  local i name url test_url kb
+  for i in "${!urls[@]}"; do
+    name="${names[$i]}"
+    url="${urls[$i]}"
+    test_url="${url%/}/index.json"
+    if _url_head_ok "$test_url"; then
+      kb="$(_url_speed_kbps "$test_url")"
+      NODE_WORKING+=("$name|$url|$kb")
+    else
+      NODE_FAILED+=("$name|$url|0")
+    fi
+  done
+}
+
+_node_apply_official() {
+  rm -f /etc/profile.d/nodejs-mirror.sh
+  echo -e "${GREEN}✅ Node.js mirror set to Official (no system-wide mirror env).${RESET}"
+}
+
+_node_apply_mirror() {
+  local mirror="$1"
+  cat > /etc/profile.d/nodejs-mirror.sh <<EOF
+# Node.js mirror for installers like nvm/n
+export NVM_NODEJS_ORG_MIRROR="${mirror%/}"
+EOF
+  chmod 644 /etc/profile.d/nodejs-mirror.sh
+  echo -e "${GREEN}✅ Node.js mirror applied (system-wide): ${WHITE}${mirror}${RESET}"
+  echo -e "${YELLOW}⚠️ Re-login required for env to take effect in new shells.${RESET}"
+}
+
+node_mirror_menu() {
+  while true; do
+    if ! _node_is_installed; then
+      echo -e "${RED}❌ Node.js/npm/nvm not detected. (If you only want to preconfigure, install Node.js first.)${RESET}"
+      _press_enter_back
+      return
+    fi
+
+    draw_menu "Node.js Mirrors" \
+      "1) Official (nodejs.org default)" \
+      "2) Iranian mirror (auto-test)" \
+      "3) Back"
+    read c
+    case "$c" in
+      1)
+        _node_apply_official
+        _press_enter_back
+        return
+        ;;
+      2)
+        echo -e "${YELLOW}⏳ Testing Node.js mirror(s)...${RESET}"
+        _node_test_and_rank
+
+        if [ ${#NODE_WORKING[@]} -eq 0 ]; then
+          echo -e "${RED}❌ No working Node.js mirrors found.${RESET}"
+          _press_enter_back
+          continue
+        fi
+
+        _show_working_list "📊 Working Node.js mirrors:" NODE_WORKING 1
+        IFS='|' read -r best_name best_url best_kb <<< "${NODE_WORKING[0]}"
+        echo -e "\n${GREEN}Suggested:${RESET} ${best_name} - ${best_url}"
+        _node_apply_mirror "$best_url"
+        _press_enter_back
+        return
+        ;;
+      3) return ;;
+      *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+    esac
+  done
+}
+
+_npm_is_installed() { have_cmd npm; }
+
+_npm_test_and_rank() {
+  NPM_WORKING=()
+  NPM_FAILED=()
+
+  local names=("Runflare")
+  local urls=("https://mirror-npm.runflare.com/")
+
+  local i name url test_url kb
+  for i in "${!urls[@]}"; do
+    name="${names[$i]}"
+    url="${urls[$i]}"
+    test_url="${url%/}/-/ping"
+    if _url_head_ok "$test_url"; then
+      kb="$(_url_speed_kbps "$test_url")"
+      NPM_WORKING+=("$name|$url|$kb")
+    else
+      NPM_FAILED+=("$name|$url|0")
+    fi
+  done
+}
+
+_npm_apply_official() {
+  npm config set registry "https://registry.npmjs.org/" >/dev/null 2>&1
+  echo -e "${GREEN}✅ npm registry set to Official.${RESET}"
+}
+
+_npm_apply_mirror() {
+  local mirror="$1"
+  npm config set registry "$mirror" >/dev/null 2>&1
+  echo -e "${GREEN}✅ npm registry mirror applied: ${WHITE}${mirror}${RESET}"
+}
+
+npm_mirror_menu() {
+  while true; do
+    if ! _npm_is_installed; then
+      echo -e "${RED}❌ npm is not installed.${RESET}"
+      _press_enter_back
+      return
+    fi
+
+    draw_menu "npm Mirrors" \
+      "1) Official (registry.npmjs.org)" \
+      "2) Iranian mirror (auto-test)" \
+      "3) Back"
+    read c
+    case "$c" in
+      1)
+        _npm_apply_official
+        _press_enter_back
+        return
+        ;;
+      2)
+        echo -e "${YELLOW}⏳ Testing npm mirror(s)...${RESET}"
+        _npm_test_and_rank
+
+        if [ ${#NPM_WORKING[@]} -eq 0 ]; then
+          echo -e "${RED}❌ No working npm mirrors found.${RESET}"
+          _press_enter_back
+          continue
+        fi
+
+        _show_working_list "📊 Working npm mirrors:" NPM_WORKING 1
+        IFS='|' read -r best_name best_url best_kb <<< "${NPM_WORKING[0]}"
+        echo -e "\n${GREEN}Suggested:${RESET} ${best_name} - ${best_url}"
+        _npm_apply_mirror "$best_url"
+        _press_enter_back
+        return
+        ;;
+      3) return ;;
+      *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+    esac
+  done
+}
+
+_pip_is_installed() { have_cmd pip || have_cmd pip3 || python3 -m pip --version >/dev/null 2>&1; }
+
+_pip_cmd() {
+  if have_cmd pip3; then echo "pip3"; return; fi
+  if have_cmd pip; then echo "pip"; return; fi
+  echo "python3 -m pip"
+}
+
+_python_test_and_rank() {
+  PYPI_WORKING=()
+  PYPI_FAILED=()
+
+  local names=("DigitalVPS" "Runflare")
+  local urls=("https://mirror.digitalvps.ir/python/" "https://mirror-pypi.runflare.com/")
+
+  local i name url test_url kb
+  for i in "${!urls[@]}"; do
+    name="${names[$i]}"
+    url="${urls[$i]}"
+    test_url="${url%/}/"
+    if _url_head_ok "$test_url"; then
+      kb="$(_url_speed_kbps "$test_url")"
+      PYPI_WORKING+=("$name|$url|$kb")
+    else
+      PYPI_FAILED+=("$name|$url|0")
+    fi
+  done
+
+  local n=${#PYPI_WORKING[@]} i2 j2
+  for ((i2=0;i2<n;i2++)); do
+    for ((j2=i2+1;j2<n;j2++)); do
+      local a b ak bk
+      a="${PYPI_WORKING[$i2]}"; b="${PYPI_WORKING[$j2]}"
+      ak="$(echo "$a" | awk -F'|' '{print $3}')"
+      bk="$(echo "$b" | awk -F'|' '{print $3}')"
+      if [ "$bk" -gt "$ak" ]; then
+        PYPI_WORKING[$i2]="$b"
+        PYPI_WORKING[$j2]="$a"
+      fi
+    done
+  done
+}
+
+_python_apply_official() {
+  local pcmd="$(_pip_cmd)"
+  $pcmd config unset global.index-url >/dev/null 2>&1
+  $pcmd config unset global.trusted-host >/dev/null 2>&1
+  echo -e "${GREEN}✅ pip set to Official (pypi.org).${RESET}"
+}
+
+_python_apply_mirror() {
+  local mirror="$1"
+  local pcmd="$(_pip_cmd)"
+  local host
+  host="$(echo "$mirror" | sed -E 's#https?://##' | cut -d/ -f1)"
+  $pcmd config set global.index-url "$mirror" >/dev/null 2>&1
+  $pcmd config set global.trusted-host "$host" >/dev/null 2>&1
+  echo -e "${GREEN}✅ pip mirror applied: ${WHITE}${mirror}${RESET}"
+}
+
+python_mirror_menu() {
+  while true; do
+    if ! _pip_is_installed; then
+      echo -e "${RED}❌ pip is not installed.${RESET}"
+      _press_enter_back
+      return
+    fi
+
+    draw_menu "Python (pip) Mirrors" \
+      "1) Official (pypi.org)" \
+      "2) Iranian mirror (auto-test & pick)" \
+      "3) Back"
+    read c
+    case "$c" in
+      1)
+        _python_apply_official
+        _press_enter_back
+        return
+        ;;
+      2)
+        echo -e "${YELLOW}⏳ Testing Python mirrors...${RESET}"
+        _python_test_and_rank
+
+        if [ ${#PYPI_WORKING[@]} -eq 0 ]; then
+          echo -e "${RED}❌ No working Python mirrors found.${RESET}"
+          draw_menu "Python Mirrors" "1) Show not working" "2) Back"
+          read x
+          if [ "$x" = "1" ]; then
+            echo -e "\n${CYAN}Not Working Python Mirrors:${RESET}"
+            if [ ${#PYPI_FAILED[@]} -eq 0 ]; then
+              echo -e "${GREEN}✅ None.${RESET}"
+            else
+              printf "${GREEN}%-4s %-18s %-55s %-10s${RESET}\n" "No." "Name" "URL" "Status"
+              echo -e "${WHITE}-------------------------------------------------------------------------------------------------${RESET}"
+              local i=1 line
+              for line in "${PYPI_FAILED[@]}"; do
+                IFS='|' read -r name url _ <<< "$line"
+                printf "%-4s %-18s %-55s %b\n" "$i" "$name" "$url" "${RED}Failed${RESET}"
+                i=$((i+1))
+              done
+            fi
+            _press_enter_back
+          fi
+          continue
+        fi
+
+        _show_working_list "📊 Working Python mirrors:" PYPI_WORKING 1
+        IFS='|' read -r best_name best_url best_kb <<< "${PYPI_WORKING[0]}"
+        echo -e "\n${GREEN}Suggested (fastest):${RESET} ${best_name} - ${best_url}"
+
+        draw_menu "Python Actions" \
+          "1) Apply suggested" \
+          "2) Choose from list" \
+          "3) Show not working" \
+          "4) Back"
+        read a
+        case "$a" in
+          1)
+            _python_apply_mirror "$best_url"
+            _press_enter_back
+            return
+            ;;
+          2)
+            read -p "$(echo -e "${ORANGE}❓ Enter mirror number [${YELLOW}1${ORANGE}]: ${RESET}")" sel
+            sel="${sel:-1}"
+            if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt ${#PYPI_WORKING[@]} ]; then
+              echo -e "${RED}❌ Invalid selection.${RESET}"
+              continue
+            fi
+            IFS='|' read -r _name _url _kb <<< "${PYPI_WORKING[$((sel-1))]}"
+            _python_apply_mirror "$_url"
+            _press_enter_back
+            return
+            ;;
+          3)
+            echo -e "\n${CYAN}Not Working Python Mirrors:${RESET}"
+            if [ ${#PYPI_FAILED[@]} -eq 0 ]; then
+              echo -e "${GREEN}✅ None.${RESET}"
+            else
+              printf "${GREEN}%-4s %-18s %-55s %-10s${RESET}\n" "No." "Name" "URL" "Status"
+              echo -e "${WHITE}-------------------------------------------------------------------------------------------------${RESET}"
+              local i=1 line
+              for line in "${PYPI_FAILED[@]}"; do
+                IFS='|' read -r name url _ <<< "$line"
+                printf "%-4s %-18s %-55s %b\n" "$i" "$name" "$url" "${RED}Failed${RESET}"
+                i=$((i+1))
+              done
+            fi
+            _press_enter_back
+            ;;
+          4) ;;
+          *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+        esac
+        ;;
+      3) return ;;
+      *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+    esac
+  done
+}
+
+
+apps_tools_mirrors_menu() {
+  while true; do
+    draw_menu "Applications and tools mirrors" \
+      "1) Docker" \
+      "2) Node.js" \
+      "3) npm" \
+      "4) Python (pip)" \
+      "5) Back"
+    read c
+    case "$c" in
+      1) docker_mirror_menu ;;
+      2) node_mirror_menu ;;
+      3) npm_mirror_menu ;;
+      4) python_mirror_menu ;;
+      5) return ;;
+      *) echo -e "${RED}❌ Invalid option.${RESET}" ;;
+    esac
+  done
+}
+
 
 choose_speedtest_server_iran() {
   while true; do
@@ -752,14 +1443,15 @@ if [ -z "$main_iface" ]; then
 fi
 
 while true; do
-  draw_menu "ToolBox Menu" \
-    "1) MTU" \
-    "2) Auto-Detect best APT Mirror" \
-    "3) DNS" \
-    "4) Check licenses of this server" \
-    "5) Benchmark this server" \
-    "6) Speedtest (by Ookla)" \
-    "7) Exit"
+    draw_menu "ToolBox Menu" \
+      "1) MTU" \
+      "2) Auto-Detect best APT Mirror" \
+      "3) DNS" \
+      "4) Applications and tools mirrors" \
+      "5) Check licenses of this server" \
+      "6) Benchmark this server" \
+      "7) Speedtest (by Ookla)" \
+      "q) Exit"
   read choice
 
   case "$choice" in
@@ -772,20 +1464,22 @@ while true; do
     3)
       dns_menu
       ;;
-    4)
+    4) apps_tools_mirrors_menu
+      ;;
+    5)
       echo -e "${CYAN}🔍 Checking streaming / unlock licenses for this server...${RESET}"
       bash <(curl -L -s check.unlock.media) -E en
       read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
       ;;
-    5)
+    6)
       echo -e "${CYAN}📈 Running server benchmark (bench.sh)...${RESET}"
       curl -Lso- bench.sh | bash
       read -p "$(echo -e "${YELLOW}Press Enter to go back...${RESET}")" _
       ;;
-    6)
+    7)
       speedtest_menu
       ;;
-    7)
+    q)
       echo -e "${YELLOW}👋 Exiting. Goodbye.${RESET}"
       exit 0
       ;;
