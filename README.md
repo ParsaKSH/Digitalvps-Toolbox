@@ -298,6 +298,6 @@ A: در تست‌های ما تا 10 برابر سریع‌تر از میرور�
 
 **ساخته شده با ❤️ توسط [DigitalVps.ir](https://digitalvps.ir)**
 
-[![ستاره بدهید](https://img.shields.io/github/stars/Digitalvps-Ir/ToolBox?style=social)](https://github.com/Digitalvps-Ir/ToolBox)
+[![ستاره بدهید](https://img.shields.io/github/stars/Digitalvps-Ir/Digitalvps-ToolBox?style=social)](https://github.com/Digitalvps-Ir/ToolBox)
 
 </div>
