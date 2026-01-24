@@ -4,7 +4,7 @@
 
 <div align="center">
 
-[![release](https://img.shields.io/badge/release-v1.2.1-%23006400)](#)
+[![release](https://img.shields.io/badge/release-v1.2.2-%23006400)](#)
 [![sponsor](https://img.shields.io/badge/sponsor-DigitalVPS.ir-%23FF0000)](https://digitalvps.ir)
 [![license](https://img.shields.io/badge/license-MIT-%23006400)](#)
 
